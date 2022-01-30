@@ -22,7 +22,7 @@ class SimClient(SDClient):
         self.msg_handler = msg_handler
 
         # connect to sim
-        super().__init__(*address)
+        super().__init__(*address, poll_socket_sleep_time=0.0)
 
         # we connect right away
         msg_handler.on_connect(self)

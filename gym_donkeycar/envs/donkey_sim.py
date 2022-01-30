@@ -527,11 +527,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
         logger.debug("custom ep_over fn set.")
 
     def determine_episode_over(self):
-        # we have a few initial frames on start that are sometimes very large CTE when it's behind
-        # the path just slightly. We ignore those.
-        if math.fabs(self.cte) > 2 * self.max_cte:
-            pass
-        elif math.fabs(self.cte) > self.max_cte:
+        if math.fabs(self.cte) > self.max_cte:
             logger.debug(f"game over: cte {self.cte}")
             self.over = True
         elif self.hit != "none":
