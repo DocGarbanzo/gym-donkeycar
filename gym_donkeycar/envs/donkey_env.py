@@ -31,7 +31,7 @@ def supply_defaults(conf):
     for key, val in defaults:
         if key not in conf:
             conf[key] = val
-            print(f"Setting default: {key} {val}")
+            logger.info(f"Setting gym conf default: {key} {val}")
 
 
 class DonkeyEnv(gym.Env):
@@ -49,7 +49,7 @@ class DonkeyEnv(gym.Env):
     VAL_PER_PIXEL = 255
 
     def __init__(self, level, conf=None):
-        print("starting DonkeyGym env")
+        logger.info("Starting DonkeyGym env")
         self.viewer = None
         self.proc = None
 
@@ -62,7 +62,9 @@ class DonkeyEnv(gym.Env):
         supply_defaults(conf)
 
         # set logging level
-        logging.basicConfig(level=conf["log_level"])  # pytype: disable=key-error
+        log_level = conf["log_level"]
+        logger.info(f'Donkey Env log level {log_level}')
+        logger.setLevel(level=log_level)
 
         logger.debug("DEBUG ON")
         logger.debug(conf)

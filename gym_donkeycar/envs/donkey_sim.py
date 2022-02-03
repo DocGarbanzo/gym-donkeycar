@@ -23,12 +23,11 @@ logger = logging.getLogger(__name__)
 
 class DonkeyUnitySimContoller:
     def __init__(self, conf):
+        logger.info(f'DonkeySimController with log level {conf["log_level"]}')
         logger.setLevel(conf["log_level"])
 
         self.address = (conf["host"], conf["port"])
-
         self.handler = DonkeyUnitySimHandler(conf=conf)
-
         self.client = SimClient(self.address, self.handler)
 
     def set_car_config(self, body_style, body_rgb, car_name, font_size):
@@ -140,6 +139,9 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.last_lap_time = 0.0
         self.current_lap_time = 0.0
         self.starting_line_index = -1
+
+        # for checking car isn't stuck
+        self.count = None
 
     def on_connect(self, client):
         logger.debug("socket connected")
@@ -339,17 +341,16 @@ class DonkeyUnitySimHandler(IMesgHandler):
     # ------- Env interface ---------- #
 
     def reset(self):
-        logger.debug("reseting")
+        logger.info("Resetting sim")
         self.send_reset_car()
         self.timer.reset()
-        time.sleep(1)
         self.image_array = np.zeros(self.camera_img_size)
         self.image_array_b = None
         self.last_obs = self.image_array
         self.time_received = time.time()
         self.last_received = self.time_received
         self.hit = "none"
-        self.cte = 0.0
+        self.cte = None
         self.x = 0.0
         self.y = 0.0
         self.z = 0.0
@@ -369,6 +370,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.lidar = []
         self.current_lap_time = 0.0
         self.last_lap_time = 0.0
+        self.count = 0
 
         # car
         self.roll = 0.0
@@ -427,14 +429,15 @@ class DonkeyUnitySimHandler(IMesgHandler):
         if done:
             return -1.0
 
-        if self.cte > self.max_cte:
+        cte = self.cte or 0
+        if math.fabs(cte) > self.max_cte:
             return -1.0
 
         if self.hit != "none":
             return -2.0
 
         # going fast close to the center of lane yeilds best reward
-        return (1.0 - (math.fabs(self.cte) / self.max_cte)) * self.speed
+        return (1.0 - (math.fabs(cte) / self.max_cte)) * self.speed
 
     # ------ Socket interface ----------- #
 
@@ -478,14 +481,21 @@ class DonkeyUnitySimHandler(IMesgHandler):
             self.pitch = data["pitch"]
             self.yaw = data["yaw"]
 
+        if "lidar" in data:
+            self.lidar = self.process_lidar_packet(data["lidar"])
+
         # Cross track error not always present.
         # Will be missing if path is not setup in the given scene.
         # It should be setup in the 4 scenes available now.
         if "cte" in data:
-            self.cte = data["cte"]
-
-        if "lidar" in data:
-            self.lidar = self.process_lidar_packet(data["lidar"])
+            cte = data["cte"]
+            # after a reset the first readings are off, only update if value
+            # is small again
+            if self.cte is None:
+                if math.fabs(cte) < 0.5:
+                    self.cte = cte
+            else:
+                self.cte = cte
 
         # don't update hit once session over
         if self.over:
@@ -524,21 +534,32 @@ class DonkeyUnitySimHandler(IMesgHandler):
         allow userd to define their own episode over function
         """
         self.determine_episode_over = types.MethodType(ep_over_fn, self)
-        logger.debug("custom ep_over fn set.")
+        logger.info("custom ep_over fn set.")
 
     def determine_episode_over(self):
-        if math.fabs(self.cte) > self.max_cte:
-            logger.debug(f"game over: cte {self.cte}")
+        cte = self.cte or 0
+        if math.fabs(cte) > self.max_cte:
+            logger.info(f"game over: cte {cte}")
             self.over = True
         elif self.hit != "none":
-            logger.debug(f"game over: hit {self.hit}")
+            logger.info(f"game over: hit {self.hit}")
             self.over = True
         elif self.missed_checkpoint:
-            logger.debug("missed checkpoint")
+            logger.info("game over: missed checkpoint")
             self.over = True
         elif self.dq:
-            logger.debug("disqualified")
+            logger.info("game over: disqualified")
             self.over = True
+        if self.count is not None:
+            if abs(self.speed) < 0.05:
+                if self.count < 60:
+                    self.count += 1
+                else:
+                    logger.info("game over: got stuck")
+                    self.over = True
+            else:
+                self.count = 0
+
 
     def on_scene_selection_ready(self, data):
         logger.debug("SceneSelectionReady ")
