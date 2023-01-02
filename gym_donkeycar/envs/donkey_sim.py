@@ -3,13 +3,14 @@ file: donkey_sim.py
 author: Tawn Kramer
 date: 2018-08-31
 """
-
 import base64
 import logging
 import math
+import os
 import time
 import types
 from io import BytesIO
+from typing import Any, Callable, Dict, List, Tuple, Union
 
 import numpy as np
 from PIL import Image
@@ -21,8 +22,46 @@ from gym_donkeycar.core.sim_client import SimClient
 logger = logging.getLogger(__name__)
 
 
+# Math helpers added by CireNeikual (222464)
+def euler_to_quat(e):
+    cx = np.cos(e[0] * 0.5)
+    sx = np.sin(e[0] * 0.5)
+    cy = np.cos(e[1] * 0.5)
+    sy = np.sin(e[1] * 0.5)
+    cz = np.cos(e[2] * 0.5)
+    sz = np.sin(e[2] * 0.5)
+
+    x = sz * cx * cy - cz * sx * sy
+    y = cz * sx * cy + sz * cx * sy
+    z = cz * cx * sy - sz * sx * cy
+    w = cz * cx * cy + sz * sx * sy
+
+    return [x, y, z, w]
+
+
+def cross(v0, v1):
+    return [v0[1] * v1[2] - v0[2] * v1[1], v0[2] * v1[0] - v0[0] * v1[2], v0[0] * v1[1] - v0[1] * v1[0]]
+
+
+def rotate_vec(q, v):
+    uv = cross(q[0:3], v)
+    uuv = cross(q[0:3], uv)
+
+    scaleUv = 2.0 * q[3]
+
+    uv[0] *= scaleUv
+    uv[1] *= scaleUv
+    uv[2] *= scaleUv
+
+    uuv[0] *= 2.0
+    uuv[1] *= 2.0
+    uuv[2] *= 2.0
+
+    return [v[0] + uv[0] + uuv[0], v[1] + uv[1] + uuv[1], v[2] + uv[2] + uuv[2]]
+
+
 class DonkeyUnitySimContoller:
-    def __init__(self, conf):
+    def __init__(self, conf: Dict[str, Any]):
         logger.info(f'DonkeySimController with log level {conf["log_level"]}')
         logger.setLevel(conf["log_level"])
 
@@ -30,53 +69,61 @@ class DonkeyUnitySimContoller:
         self.handler = DonkeyUnitySimHandler(conf=conf)
         self.client = SimClient(self.address, self.handler)
 
-    def set_car_config(self, body_style, body_rgb, car_name, font_size):
+    def set_car_config(
+        self,
+        body_style: str,
+        body_rgb: Tuple[int, int, int],
+        car_name: str,
+        font_size: int,
+    ) -> None:
         self.handler.send_car_config(body_style, body_rgb, car_name, font_size)
 
-    def set_cam_config(self, **kwargs):
+    def set_cam_config(self, **kwargs) -> None:
         self.handler.send_cam_config(**kwargs)
 
-    def set_reward_fn(self, reward_fn):
+    def set_reward_fn(self, reward_fn: Callable) -> None:
         self.handler.set_reward_fn(reward_fn)
 
-    def set_episode_over_fn(self, ep_over_fn):
+    def set_episode_over_fn(self, ep_over_fn: Callable) -> None:
         self.handler.set_episode_over_fn(ep_over_fn)
 
-    def wait_until_loaded(self):
+    def wait_until_loaded(self) -> None:
+        time.sleep(0.1)
         while not self.handler.loaded:
             logger.warning("waiting for sim to start..")
-            time.sleep(3.0)
+            time.sleep(1.0)
+        logger.info("sim started!")
 
-    def reset(self):
+    def reset(self) -> None:
         self.handler.reset()
 
-    def get_sensor_size(self):
+    def get_sensor_size(self) -> Tuple[int, int, int]:
         return self.handler.get_sensor_size()
 
-    def take_action(self, action):
+    def take_action(self, action: np.ndarray):
         self.handler.take_action(action)
 
-    def observe(self):
+    def observe(self) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         return self.handler.observe()
 
-    def quit(self):
+    def quit(self) -> None:
         self.client.stop()
 
-    def exit_scene(self):
+    def exit_scene(self) -> None:
         self.handler.send_exit_scene()
 
-    def render(self, mode):
+    def render(self, mode: str) -> None:
         pass
 
-    def is_game_over(self):
+    def is_game_over(self) -> bool:
         return self.handler.is_game_over()
 
-    def calc_reward(self, done):
+    def calc_reward(self, done: bool) -> float:
         return self.handler.calc_reward(done)
 
 
 class DonkeyUnitySimHandler(IMesgHandler):
-    def __init__(self, conf):
+    def __init__(self, conf: Dict[str, Any]):
         self.conf = conf
         self.SceneToLoad = conf["level"]
         self.loaded = False
@@ -96,6 +143,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.y = 0.0
         self.z = 0.0
         self.speed = 0.0
+        self.forward_vel = 0.0
         self.missed_checkpoint = False
         self.dq = False
         self.over = False
@@ -139,27 +187,27 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.last_lap_time = 0.0
         self.current_lap_time = 0.0
         self.starting_line_index = -1
-
+        self.lap_count = 0
         # for checking car isn't stuck
         self.count = None
 
-    def on_connect(self, client):
+    def on_connect(self, client: SimClient) -> None:
         logger.debug("socket connected")
         self.client = client
 
-    def on_disconnect(self):
+    def on_disconnect(self) -> None:
         logger.debug("socket disconnected")
         self.client = None
 
-    def on_abort(self, message):
+    def on_abort(self, message: Dict[str, Any]) -> None:
         self.client.stop()
 
-    def on_need_car_config(self, message):
+    def on_need_car_config(self, message: Dict[str, Any]) -> None:
         logger.info("on need car config")
         self.loaded = True
         self.send_config(self.conf)
 
-    def on_collision_with_starting_line(self, message):
+    def on_collision_with_starting_line(self, message: Dict[str, Any]) -> None:
         if self.current_lap_time == 0.0:
             self.current_lap_time = message["timeStamp"]
             self.starting_line_index = message["starting_line_index"]
@@ -167,19 +215,24 @@ class DonkeyUnitySimHandler(IMesgHandler):
             time_at_crossing = message["timeStamp"]
             self.last_lap_time = float(time_at_crossing - self.current_lap_time)
             self.current_lap_time = time_at_crossing
+            self.lap_count += 1
             lap_msg = f"New lap time: {round(self.last_lap_time, 2)} seconds"
             logger.info(lap_msg)
 
     @staticmethod
-    def extract_keys(dct, lst):
-        ret_dct = {}
-        for key in lst:
-            if key in dct:
-                ret_dct[key] = dct[key]
-        return ret_dct
+    def extract_keys(dict_: Dict[str, Any], list_: List[str]) -> Dict[str, Any]:
+        return_dict = {}
+        for key in list_:
+            if key in dict_:
+                return_dict[key] = dict_[key]
+        return return_dict
 
-    def send_config(self, conf):
+    def send_config(self, conf: Dict[str, Any]) -> None:
 
+        if "degPerSweepInc" in conf:
+            raise ValueError("LIDAR config keys were renamed to use snake_case name instead of CamelCase")
+
+        logger.info("sending car config.")
         # both ways work, car_config shouldn't interfere with other config, so keeping the two alternative
         self.set_car_config(conf)
         if "car_config" in conf.keys():
@@ -232,14 +285,17 @@ class DonkeyUnitySimHandler(IMesgHandler):
             self.image_array_b = np.zeros(self.camera_img_size)
 
         if "lidar_config" in conf.keys():
+            if "degPerSweepInc" in conf:
+                raise ValueError("LIDAR config keys were renamed to use snake_case name instead of CamelCase")
+
             lidar_config = self.extract_keys(
                 conf["lidar_config"],
                 [
-                    "degPerSweepInc",
-                    "degAngDown",
-                    "degAngDelta",
-                    "numSweepsLevels",
-                    "maxRange",
+                    "deg_per_sweep_inc",
+                    "deg_ang_down",
+                    "deg_ang_delta",
+                    "num_sweeps_levels",
+                    "max_range",
                     "noise",
                     "offset_x",
                     "offset_y",
@@ -284,11 +340,11 @@ class DonkeyUnitySimHandler(IMesgHandler):
         lidar_config = self.extract_keys(
             conf,
             [
-                "degPerSweepInc",
-                "degAngDown",
-                "degAngDelta",
-                "numSweepsLevels",
-                "maxRange",
+                "deg_per_sweep_inc",
+                "deg_ang_down",
+                "deg_ang_delta",
+                "num_sweeps_levels",
+                "max_range",
                 "noise",
                 "offset_x",
                 "offset_y",
@@ -307,7 +363,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
                 + "}"
             )
 
-    def set_car_config(self, conf):
+    def set_car_config(self, conf: Dict[str, Any]) -> None:
         if "body_style" in conf:
             self.send_car_config(
                 conf["body_style"],
@@ -316,8 +372,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
                 conf["font_size"],
             )
 
-    def set_racer_bio(self, conf):
-        self.conf = conf
+    def set_racer_bio(self, conf: Dict[str, Any]) -> None:
         if "bio" in conf:
             self.send_racer_bio(
                 conf["racer_name"],
@@ -327,7 +382,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
                 conf["guid"],
             )
 
-    def on_recv_message(self, message):
+    def on_recv_message(self, message: Dict[str, Any]) -> None:
         if "msg_type" not in message:
             logger.warn("expected msg_type field")
             return
@@ -340,21 +395,23 @@ class DonkeyUnitySimHandler(IMesgHandler):
 
     # ------- Env interface ---------- #
 
-    def reset(self):
+    def reset(self) -> None:
         logger.info("Resetting sim")
         self.send_reset_car()
         self.timer.reset()
+        #time.sleep(1)
         self.image_array = np.zeros(self.camera_img_size)
         self.image_array_b = None
         self.last_obs = self.image_array
         self.time_received = time.time()
         self.last_received = self.time_received
         self.hit = "none"
-        self.cte = None
+        self.cte = 0.0
         self.x = 0.0
         self.y = 0.0
         self.z = 0.0
         self.speed = 0.0
+        self.forward_vel = 0.0
         self.over = False
         self.missed_checkpoint = False
         self.dq = False
@@ -370,20 +427,20 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.lidar = []
         self.current_lap_time = 0.0
         self.last_lap_time = 0.0
-        self.count = 0
+        self.lap_count = 0
 
         # car
         self.roll = 0.0
         self.pitch = 0.0
         self.yaw = 0.0
 
-    def get_sensor_size(self):
+    def get_sensor_size(self) -> Tuple[int, int, int]:
         return self.camera_img_size
 
-    def take_action(self, action):
+    def take_action(self, action: np.ndarray) -> None:
         self.send_control(action[0], action[1])
 
-    def observe(self):
+    def observe(self) -> Tuple[np.ndarray, float, bool, Dict[str, Any]]:
         while self.last_received == self.time_received:
             time.sleep(0.001)
 
@@ -396,6 +453,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
             "pos": (self.x, self.y, self.z),
             "cte": self.cte,
             "speed": self.speed,
+            "forward_vel": self.forward_vel,
             "hit": self.hit,
             "gyro": (self.gyro_x, self.gyro_y, self.gyro_z),
             "accel": (self.accel_x, self.accel_y, self.accel_z),
@@ -403,6 +461,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
             "lidar": (self.lidar),
             "car": (self.roll, self.pitch, self.yaw),
             "last_lap_time": self.last_lap_time,
+            "lap_count": self.lap_count,
         }
 
         # Add the second image to the dict
@@ -413,19 +472,23 @@ class DonkeyUnitySimHandler(IMesgHandler):
 
         return observation, reward, done, info
 
-    def is_game_over(self):
+    def is_game_over(self) -> bool:
         return self.over
 
     # ------ RL interface ----------- #
 
-    def set_reward_fn(self, reward_fn):
+    def set_reward_fn(self, reward_fn: Callable[[], float]):
         """
         allow users to set their own reward function
         """
         self.calc_reward = types.MethodType(reward_fn, self)
         logger.debug("custom reward fn set.")
 
-    def calc_reward(self, done):
+    def calc_reward(self, done: bool) -> float:
+        # Normalization factor, real max speed is around 30
+        # but only attained on a long straight line
+        max_speed = 10
+
         if done:
             return -1.0
 
@@ -433,103 +496,107 @@ class DonkeyUnitySimHandler(IMesgHandler):
         if math.fabs(cte) > self.max_cte:
             return -1.0
 
+        # Collision
         if self.hit != "none":
             return -2.0
 
         # going fast close to the center of lane yeilds best reward
-        return (1.0 - (math.fabs(cte) / self.max_cte)) * self.speed
+        if self.forward_vel > 0.0:
+            return (1.0 - (math.fabs(self.cte) / self.max_cte)) * self.forward_vel
+
+        return self.forward_vel # in reverse, reward doesn't have centering term as this can result in some exploits
 
     # ------ Socket interface ----------- #
 
-    def on_telemetry(self, data):
-
-        imgString = data["image"]
-        image = Image.open(BytesIO(base64.b64decode(imgString)))
+    def on_telemetry(self, message: Dict[str, Any]) -> None:
+        img_string = message["image"]
+        image = Image.open(BytesIO(base64.b64decode(img_string)))
 
         # always update the image_array as the observation loop will hang if not changing.
         self.image_array = np.asarray(image)
         self.time_received = time.time()
 
-        if "image_b" in data:
-            imgString_b = data["image_b"]
-            image_b = Image.open(BytesIO(base64.b64decode(imgString_b)))
+        if "image_b" in message:
+            img_string_b = message["image_b"]
+            image_b = Image.open(BytesIO(base64.b64decode(img_string_b)))
             self.image_array_b = np.asarray(image_b)
 
-        if "pos_x" in data:
-            self.x = data["pos_x"]
-            self.y = data["pos_y"]
-            self.z = data["pos_z"]
+        if "pos_x" in message:
+            self.x = message["pos_x"]
+            self.y = message["pos_y"]
+            self.z = message["pos_z"]
 
-        if "speed" in data:
-            self.speed = data["speed"]
+        if "speed" in message:
+            self.speed = message["speed"]
 
-        if "gyro_x" in data:
-            self.gyro_x = data["gyro_x"]
-            self.gyro_y = data["gyro_y"]
-            self.gyro_z = data["gyro_z"]
-        if "accel_x" in data:
-            self.accel_x = data["accel_x"]
-            self.accel_y = data["accel_y"]
-            self.accel_z = data["accel_z"]
-        if "vel_x" in data:
-            self.vel_x = data["vel_x"]
-            self.vel_y = data["vel_y"]
-            self.vel_z = data["vel_z"]
+        e = [self.pitch * np.pi / 180.0, self.yaw * np.pi / 180.0, self.roll * np.pi / 180.0]
+        q = euler_to_quat(e)
 
-        if "roll" in data:
-            self.roll = data["roll"]
-            self.pitch = data["pitch"]
-            self.yaw = data["yaw"]
+        forward = rotate_vec(q, [0.0, 0.0, 1.0])
 
-        if "lidar" in data:
-            self.lidar = self.process_lidar_packet(data["lidar"])
+        # dot
+        self.forward_vel = forward[0] * self.vel_x + forward[1] * self.vel_y + forward[2] * self.vel_z
+
+        if "gyro_x" in message:
+            self.gyro_x = message["gyro_x"]
+            self.gyro_y = message["gyro_y"]
+            self.gyro_z = message["gyro_z"]
+        if "accel_x" in message:
+            self.accel_x = message["accel_x"]
+            self.accel_y = message["accel_y"]
+            self.accel_z = message["accel_z"]
+        if "vel_x" in message:
+            self.vel_x = message["vel_x"]
+            self.vel_y = message["vel_y"]
+            self.vel_z = message["vel_z"]
+
+        if "roll" in message:
+            self.roll = message["roll"]
+            self.pitch = message["pitch"]
+            self.yaw = message["yaw"]
 
         # Cross track error not always present.
         # Will be missing if path is not setup in the given scene.
         # It should be setup in the 4 scenes available now.
-        if "cte" in data:
-            cte = data["cte"]
-            # after a reset the first readings are off, only update if value
-            # is small again
-            if self.cte is None:
-                if math.fabs(cte) < 0.5:
-                    self.cte = cte
-            else:
-                self.cte = cte
+        if "cte" in message:
+            self.cte = message["cte"]
+
+        if "lidar" in message:
+            self.lidar = self.process_lidar_packet(message["lidar"])
 
         # don't update hit once session over
         if self.over:
             return
 
-        if "hit" in data:
-            self.hit = data["hit"]
+        if "hit" in message:
+            self.hit = message["hit"]
 
         self.determine_episode_over()
 
-    def on_cross_start(self, data):
-        logger.info(f"crossed start line: lap_time {data['lap_time']}")
+    def on_cross_start(self, message: Dict[str, Any]) -> None:
+        logger.info(f"crossed start line: lap_time {message['lap_time']}")
 
-    def on_race_start(self, data):
+    def on_race_start(self, message: Dict[str, Any]) -> None:
         logger.debug("race started")
 
-    def on_race_stop(self, data):
+    def on_race_stop(self, message: Dict[str, Any]) -> None:
         logger.debug("race stoped")
 
-    def on_missed_checkpoint(self, message):
+    def on_missed_checkpoint(self, message: Dict[str, Any]) -> None:
         logger.info("racer missed checkpoint")
         self.missed_checkpoint = True
 
-    def on_DQ(self, data):
+    def on_DQ(self, message: Dict[str, Any]) -> None:
         logger.info("racer DQ")
         self.dq = True
 
-    def on_ping(self, message):
+    def on_ping(self, message: Dict[str, Any]) -> None:
         """
         no reply needed at this point. Server sends these as a keep alive to make sure clients haven't gone away.
         """
         pass
 
-    def set_episode_over_fn(self, ep_over_fn):
+    def set_episode_over_fn(self, ep_over_fn: Callable[[], bool]):
         """
         allow userd to define their own episode over function
         """
@@ -537,9 +604,12 @@ class DonkeyUnitySimHandler(IMesgHandler):
         logger.info("custom ep_over fn set.")
 
     def determine_episode_over(self):
-        cte = self.cte or 0
-        if math.fabs(cte) > self.max_cte:
-            logger.info(f"game over: cte {cte}")
+        # we have a few initial frames on start that are sometimes very large CTE when it's behind
+        # the path just slightly. We ignore those.
+        if math.fabs(self.cte) > 2 * self.max_cte:
+            pass
+        elif math.fabs(self.cte) > self.max_cte:
+            logger.info(f"game over: cte {self.cte}")
             self.over = True
         elif self.hit != "none":
             logger.info(f"game over: hit {self.hit}")
@@ -561,18 +631,24 @@ class DonkeyUnitySimHandler(IMesgHandler):
                 self.count = 0
 
 
-    def on_scene_selection_ready(self, data):
-        logger.debug("SceneSelectionReady ")
+        # Disable reset
+        if os.environ.get("RACE") == "True":
+            self.over = False
+
+    def on_scene_selection_ready(self, message: Dict[str, Any]) -> None:
+        logger.debug("SceneSelectionReady")
         self.send_get_scene_names()
 
-    def on_car_loaded(self, data):
+    def on_car_loaded(self, message: Dict[str, Any]) -> None:
         logger.debug("car loaded")
         self.loaded = True
-        self.on_need_car_config("")
+        # Enable hand brake, so the car doesn't move
+        self.send_control(0, 0, 1.0)
+        self.on_need_car_config({})
 
-    def on_recv_scene_names(self, data):
-        if data:
-            names = data["scene_names"]
+    def on_recv_scene_names(self, message: Dict[str, Any]) -> None:
+        if message:
+            names = message["scene_names"]
             logger.debug(f"SceneNames: {names}")
             print("loading scene", self.SceneToLoad)
             if self.SceneToLoad in names:
@@ -580,42 +656,50 @@ class DonkeyUnitySimHandler(IMesgHandler):
             else:
                 raise ValueError(f"Scene name {self.SceneToLoad} not in scene list {names}")
 
-    def send_control(self, steer, throttle):
+    def send_control(self, steer: float, throttle: float, brake: float = 0.0) -> None:
+        """
+        Send command to simulator.
+
+        :param steer: desired steering
+        :param throttle: desired throttle
+        :param brake: whether to activate or not hand brake
+            (can be a continuous value)
+        """
         if not self.loaded:
             return
         msg = {
             "msg_type": "control",
-            "steering": steer.__str__(),
-            "throttle": throttle.__str__(),
-            "brake": "0.0",
+            "steering": str(steer),
+            "throttle": str(throttle),
+            "brake": str(brake),
         }
         self.queue_message(msg)
 
-    def send_reset_car(self):
+    def send_reset_car(self) -> None:
         msg = {"msg_type": "reset_car"}
         self.queue_message(msg)
 
-    def send_get_scene_names(self):
+    def send_get_scene_names(self) -> None:
         msg = {"msg_type": "get_scene_names"}
         self.queue_message(msg)
 
-    def send_load_scene(self, scene_name):
+    def send_load_scene(self, scene_name: str) -> None:
         msg = {"msg_type": "load_scene", "scene_name": scene_name}
         self.queue_message(msg)
 
-    def send_exit_scene(self):
+    def send_exit_scene(self) -> None:
         msg = {"msg_type": "exit_scene"}
         self.queue_message(msg)
 
     def send_car_config(
         self,
-        body_style="donkey",
-        body_rgb=[255, 255, 255],
-        car_name="car",
-        font_size=100,
+        body_style: str = "donkey",
+        body_rgb: Tuple[int, int, int] = (255, 255, 255),
+        car_name: str = "car",
+        font_size: int = 100,
     ):
         """
-        # body_style = "donkey" | "bare" | "car01" choice of string
+        # body_style = "donkey" | "bare" | "car01" | "f1" | "cybertruck"
         # body_rgb  = (128, 128, 128) tuple of ints
         # car_name = "string less than 64 char"
         """
@@ -637,7 +721,7 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.blocking_send(msg)
         time.sleep(0.1)
 
-    def send_racer_bio(self, racer_name, car_name, bio, country, guid):
+    def send_racer_bio(self, racer_name: str, car_name: str, bio: str, country: str, guid: str) -> None:
         # body_style = "donkey" | "bare" | "car01" choice of string
         # body_rgb  = (128, 128, 128) tuple of ints
         # car_name = "string less than 64 char"
@@ -655,21 +739,21 @@ class DonkeyUnitySimHandler(IMesgHandler):
 
     def send_cam_config(
         self,
-        msg_type="cam_config",
-        img_w=0,
-        img_h=0,
-        img_d=0,
-        img_enc=0,
-        fov=0,
-        fish_eye_x=0,
-        fish_eye_y=0,
-        offset_x=0,
-        offset_y=0,
-        offset_z=0,
-        rot_x=0,
-        rot_y=0,
-        rot_z=0,
-    ):
+        msg_type: str = "cam_config",
+        img_w: int = 0,
+        img_h: int = 0,
+        img_d: int = 0,
+        img_enc: Union[str, int] = 0,  # 0 is default value
+        fov: int = 0,
+        fish_eye_x: float = 0.0,
+        fish_eye_y: float = 0.0,
+        offset_x: float = 0.0,
+        offset_y: float = 0.0,
+        offset_z: float = 0.0,
+        rot_x: float = 0.0,
+        rot_y: float = 0.0,
+        rot_z: float = 0.0,
+    ) -> None:
         """Camera config
         set any field to Zero to get the default camera setting.
         offset_x moves camera left/right
@@ -700,27 +784,28 @@ class DonkeyUnitySimHandler(IMesgHandler):
 
     def send_lidar_config(
         self,
-        degPerSweepInc=2.0,
-        degAngDown=0.0,
-        degAngDelta=-1.0,
-        numSweepsLevels=1,
-        maxRange=50.0,
-        noise=0.5,
-        offset_x=0.0,
-        offset_y=0.5,
-        offset_z=0.5,
-        rot_x=0.0,
+        deg_per_sweep_inc: float = 2.0,
+        deg_ang_down: float = 0.0,
+        deg_ang_delta: float = -1.0,
+        num_sweeps_levels: int = 1,
+        max_range: float = 50.0,
+        noise: float = 0.5,
+        offset_x: float = 0.0,
+        offset_y: float = 0.5,
+        offset_z: float = 0.5,
+        rot_x: float = 0.0,
     ):
         """Lidar config
-        the offset_x moves lidar left/right
+        offset_x moves lidar left/right
         the offset_y moves lidar up/down
         the offset_z moves lidar forward/back
-        degPerSweepInc : as the ray sweeps around, how many degrees does it advance per sample (int)
-        degAngDown : what is the starting angle for the initial sweep compared to the forward vector
-        degAngDelta : what angle change between sweeps
-        numSweepsLevels : how many complete 360 sweeps (int)
-        maxRange : what it max distance we will register a hit
+        deg_per_sweep_inc : as the ray sweeps around, how many degrees does it advance per sample (int)
+        deg_ang_down : what is the starting angle for the initial sweep compared to the forward vector
+        deg_ang_delta : what angle change between sweeps
+        num_sweeps_levels : how many complete 360 sweeps (int)
+        max_range : what it max distance we will register a hit
         noise : what is the scalar on the perlin noise applied to point position
+
         Here's some sample settings that similate a more sophisticated lidar:
         msg = '{ "msg_type" : "lidar_config",
         "degPerSweepInc" : "2.0", "degAngDown" : "25", "degAngDelta" : "-1.0",
@@ -734,11 +819,11 @@ class DonkeyUnitySimHandler(IMesgHandler):
         """
         msg = {
             "msg_type": "lidar_config",
-            "degPerSweepInc": str(degPerSweepInc),
-            "degAngDown": str(degAngDown),
-            "degAngDelta": str(degAngDelta),
-            "numSweepsLevels": str(numSweepsLevels),
-            "maxRange": str(maxRange),
+            "degPerSweepInc": str(deg_per_sweep_inc),
+            "degAngDown": str(deg_ang_down),
+            "degAngDelta": str(deg_ang_delta),
+            "numSweepsLevels": str(num_sweeps_levels),
+            "maxRange": str(max_range),
             "noise": str(noise),
             "offset_x": str(offset_x),
             "offset_y": str(offset_y),
@@ -748,11 +833,11 @@ class DonkeyUnitySimHandler(IMesgHandler):
         self.blocking_send(msg)
         time.sleep(0.1)
 
-        self.lidar_deg_per_sweep_inc = float(degPerSweepInc)
-        self.lidar_num_sweep_levels = int(numSweepsLevels)
-        self.lidar_deg_ang_delta = float(degAngDelta)
+        self.lidar_deg_per_sweep_inc = float(deg_per_sweep_inc)
+        self.lidar_num_sweep_levels = int(num_sweeps_levels)
+        self.lidar_deg_ang_delta = float(deg_ang_delta)
 
-    def process_lidar_packet(self, lidar_info):
+    def process_lidar_packet(self, lidar_info: List[Dict[str, float]]) -> np.ndarray:
         point_per_sweep = int(360 / self.lidar_deg_per_sweep_inc)
         points_num = round(abs(self.lidar_num_sweep_levels * point_per_sweep))
         reconstructed_lidar_info = [-1 for _ in range(points_num)]  # we chose -1 to be the "None" value
@@ -770,17 +855,17 @@ class DonkeyUnitySimHandler(IMesgHandler):
 
         return np.array(reconstructed_lidar_info)
 
-    def blocking_send(self, msg):
+    def blocking_send(self, msg: Dict[str, Any]) -> None:
         if self.client is None:
-            logger.debug(f"skiping: \n {msg}")
+            logger.debug(f"skipping: \n {msg}")
             return
 
         logger.debug(f"blocking send \n {msg}")
         self.client.send_now(msg)
 
-    def queue_message(self, msg):
+    def queue_message(self, msg: Dict[str, Any]) -> None:
         if self.client is None:
-            logger.debug(f"skiping: \n {msg}")
+            logger.debug(f"skipping: \n {msg}")
             return
 
         logger.debug(f"sending \n {msg}")
